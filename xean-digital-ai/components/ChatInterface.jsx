@@ -10,13 +10,14 @@ import { extractArtifacts, isLargeBlock } from '@/lib/artifacts';
 import { streamChat } from '@/lib/stream';
 import { loadModel, loadThreads, saveModel, saveThreads } from '@/lib/storage';
 import { makeTitle, uid } from '@/lib/utils';
-import { FALLBACK_MODEL } from '@/lib/config';
+import ModelSelector from './ModelSelector';
 
 export default function ChatInterface() {
   const [threads, setThreads] = useState([]);
   const [activeId, setActiveId] = useState(null);
-  const [models, setModels] = useState([{ id: FALLBACK_MODEL }]);
-  const [model, setModel] = useState(FALLBACK_MODEL);
+  const [models, setModels] = useState([]);
+  const [selection, setSelection] = useState(null);
+  const [refreshingModels, setRefreshingModels] = useState(false);
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState('');
   const [artifactRef, setArtifactRef] = useState(null); // { messageId, index }
@@ -34,27 +35,37 @@ export default function ChatInterface() {
     setActiveId(saved[0]?.id ?? null);
     const savedModel = loadModel();
     if (savedModel) {
-      setModel(savedModel);
+      setSelection(savedModel);
       modelChosen.current = true;
     }
     setHydrated(true);
   }, []);
 
-  // Ambil daftar model (server punya fallback bila GET /v1/models gagal)
+  async function syncModels(force = false) {
+    setRefreshingModels(true);
+    try {
+      const res = await fetch(`/api/models${force ? '?refresh=1' : ''}`, { cache: 'no-store' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || 'Gagal mengambil katalog model.');
+      if (!Array.isArray(data.models)) throw new Error('Format katalog model tidak valid.');
+      setModels(data.models);
+      if (!modelChosen.current) {
+        const preferred = data.models.find((m) => m.provider === data.defaultProvider) || data.models[0];
+        if (preferred) {
+          setSelection({ provider: preferred.provider, id: preferred.id });
+          saveModel({ provider: preferred.provider, id: preferred.id });
+        }
+      }
+    } catch (err) {
+      if (!force) setError(err?.message || 'Katalog model tidak tersedia.');
+    } finally {
+      setRefreshingModels(false);
+    }
+  }
+
   useEffect(() => {
-    let cancelled = false;
-    fetch('/api/models')
-      .then((r) => r.json())
-      .then((data) => {
-        if (cancelled || !Array.isArray(data.models) || !data.models.length) return;
-        setModels(data.models);
-        if (!modelChosen.current && data.default) setModel(data.default);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    if (hydrated) syncModels(false);
+  }, [hydrated]);
 
   // Simpan riwayat (ditunda saat streaming agar tidak menulis setiap token)
   useEffect(() => {
@@ -65,10 +76,7 @@ export default function ChatInterface() {
 
   const activeThread = useMemo(() => threads.find((t) => t.id === activeId) || null, [threads, activeId]);
 
-  const modelOptions = useMemo(
-    () => (models.some((m) => m.id === model) ? models : [{ id: model }, ...models]),
-    [models, model]
-  );
+  const selectedModel = useMemo(() => models.find((m) => m.provider === selection?.provider && m.id === selection?.id) || null, [models, selection]);
 
   // Artifact yang sedang dibuka, dihitung ulang dari isi pesan agar ikut update saat streaming
   const artifactState = useMemo(() => {
@@ -119,8 +127,12 @@ export default function ChatInterface() {
 
   async function handleSend(text) {
     const content = text.trim();
-    if (!content || streaming) return;
+    if (!content || streaming || !selection?.id || !selection?.provider) return;
     setError('');
+    if (!selection?.id || !selection?.provider) {
+      setError('Pilih model terlebih dahulu.');
+      return;
+    }
 
     const userMsg = { id: uid(), role: 'user', content };
     const botMsg = { id: uid(), role: 'assistant', content: '' };
@@ -161,7 +173,9 @@ export default function ChatInterface() {
     try {
       await streamChat({
         messages: history.map(({ role, content: c }) => ({ role, content: c })),
-        model,
+        model: selection?.id,
+        provider: selection?.provider,
+        modelMeta: selectedModel,
         signal: controller.signal,
         onToken: (tok) => {
           pending += tok;
@@ -211,10 +225,11 @@ export default function ChatInterface() {
     setThreads((prev) => prev.filter((t) => t.id !== id));
   }
 
-  function handleModelChange(id) {
+  function handleModelChange(next) {
     modelChosen.current = true;
-    setModel(id);
-    saveModel(id);
+    const value = { provider: next.provider, id: next.id };
+    setSelection(value);
+    saveModel(value);
   }
 
   const docked = !panelOpen;
@@ -245,21 +260,17 @@ export default function ChatInterface() {
           <h1 className="min-w-0 flex-1 truncate font-sans text-lg font-black">
             {activeThread?.title ?? 'Percakapan baru'}
           </h1>
-          <label className="flex items-center gap-2 text-sm font-bold">
+          <div className="flex items-center gap-2 text-sm font-bold">
             <span className="sr-only sm:not-sr-only">Model</span>
-            <select
-              value={model}
-              onChange={(e) => handleModelChange(e.target.value)}
+            <ModelSelector
+              models={models}
+              selected={selection}
+              onChange={handleModelChange}
+              onRefresh={() => syncModels(true)}
+              refreshing={refreshingModels}
               disabled={streaming}
-              className="max-w-[10rem] border-2 border-black bg-aqua px-2 py-1.5 font-mono text-xs font-bold shadow-brutal-sm sm:max-w-[16rem]"
-            >
-              {modelOptions.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.id}
-                </option>
-              ))}
-            </select>
-          </label>
+            />
+          </div>
         </header>
 
         {error && (

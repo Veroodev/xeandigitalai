@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "test:xkiro": "node scripts-test-xkiro.mjs"
   },
   "dependencies": {
     "highlight.js": "^11.10.0",

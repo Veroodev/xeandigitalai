@@ -1,10 +1,9 @@
-// Membaca stream SSE dari /api/chat.
-// Mendukung format OpenAI (choices[0].delta.content) dan Anthropic (content_block_delta).
-export async function streamChat({ messages, model, signal, onToken }) {
+// Membaca stream SSE internal Xean dari /api/chat. Provider-specific wire format dinormalisasi server-side.
+export async function streamChat({ messages, provider, model, modelMeta, signal, onToken, onMeta }) {
   const res = await fetch('/api/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ messages, model }),
+    body: JSON.stringify({ messages, provider, model, modelMeta }),
     signal,
   });
 
@@ -13,9 +12,7 @@ export async function streamChat({ messages, model, signal, onToken }) {
     try {
       const data = await res.json();
       if (data?.error) message = data.detail ? `${data.error}: ${data.detail}` : data.error;
-    } catch {
-      /* body bukan JSON */
-    }
+    } catch {}
     throw new Error(message);
   }
 
@@ -29,24 +26,12 @@ export async function streamChat({ messages, model, signal, onToken }) {
       if (!line.startsWith('data:')) continue;
       const data = line.slice(5).trim();
       if (!data) continue;
-      if (data === '[DONE]') {
-        finished = true;
-        return;
-      }
+      if (data === '[DONE]') { finished = true; return; }
       let json;
-      try {
-        json = JSON.parse(data);
-      } catch {
-        continue;
-      }
-      if (json.error) {
-        throw new Error(typeof json.error === 'string' ? json.error : json.error.message || 'Galat dari model.');
-      }
-      const token =
-        json.choices?.[0]?.delta?.content ??
-        (json.type === 'content_block_delta' ? json.delta?.text : '') ??
-        '';
-      if (token) onToken(token);
+      try { json = JSON.parse(data); } catch { continue; }
+      if (json.type === 'error') throw new Error(json.error?.message || 'Galat dari model.');
+      if (json.type === 'meta') onMeta?.(json);
+      if (json.type === 'token' && json.content) onToken(json.content);
     }
   };
 
@@ -56,10 +41,8 @@ export async function streamChat({ messages, model, signal, onToken }) {
     buffer += decoder.decode(value, { stream: true });
     const events = buffer.split(/\r?\n\r?\n/);
     buffer = events.pop() ?? '';
-    for (const ev of events) {
-      handleEvent(ev);
-      if (finished) break;
-    }
+    for (const ev of events) { handleEvent(ev); if (finished) break; }
   }
   if (!finished && buffer.trim()) handleEvent(buffer);
+  if (!finished && !signal?.aborted) throw new Error('Stream berakhir sebelum selesai.');
 }
